@@ -1,0 +1,6 @@
+[submodule "backend"]
+	path = backend
+	url = https://github.com/daniel0321forever/terriyaki-go
+[submodule "frontend"]
+	path = frontend
+	url = https://github.com/daniel0321forever/terriyaki-next
