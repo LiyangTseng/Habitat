@@ -8,34 +8,54 @@
 //! - Mark the pledge as resolved only after the transfer is complete.
 //! - Return a receipt for backend reconciliation.
 
+use anchor_lang::prelude::{Account, Program, System, ToAccountInfo};
+
+
+
 use crate::{
     config::DEFAULT_TIMEOUT_GRACE_SECONDS,
     error::ContractError,
-    instructions::pledge_resolution::{update_pledge_status, build_resolution_receipt},
+    instructions::pledge_resolution::{build_resolution_receipt, transfer_escrow, update_pledge_status, validate_pledge_authorized},
     state::{pledge_state::PledgeState, resolution_receipt::ResolutionReceipt},
     types::PledgeStatus,
 };
 
-pub(crate) fn claim_timeout(
-    pledge: &mut PledgeState,
+pub(crate) fn claim_timeout<'info, D>(
+    pledge: &mut Account<'info, PledgeState>,
+    user: &D,
+    system_program: &Program<'info, System>,
+    signer_seeds: &[&[&[u8]]],
     user_signer: &str,
-    now_unix: i64,
     tx_hash: String,
-) -> Result<ResolutionReceipt, ContractError> {
+    finalized_at_unix: i64,
+) -> Result<ResolutionReceipt, ContractError>
+where
+    D: ToAccountInfo<'info>,
+{
     // 1. Confirm the caller is the pledge owner.
     // 2. Confirm the deadline plus grace period has passed.
     // 3. Transfer escrow back to the user.
     // 4. Flip state to the timeout resolution path.
     // 5. Build the timeout receipt.
-    validate_timeout_claim(pledge, user_signer, now_unix)?;
-    transfer_timeout_refund_stub()?;
+    let timeout_at = timeout_claim_eligibility_timestamp(pledge.deadline_timestamp);
+    if finalized_at_unix < timeout_at {
+        return Err(ContractError::TimeoutNotReached);
+    }
+
+    validate_pledge_authorized(
+        &pledge.status,
+        user_signer,
+        &pledge.user_pubkey,
+        ContractError::UnauthorizedUser
+    )?;
+    transfer_escrow(pledge, user, system_program, signer_seeds)?;
     update_pledge_status(pledge, PledgeStatus::ResolvedSuccess);
 
     Ok(build_resolution_receipt(
         pledge,
         user_signer,
         tx_hash,
-        now_unix,
+        finalized_at_unix,
     ))
 }
 
@@ -43,37 +63,204 @@ pub(crate) fn timeout_claim_eligibility_timestamp(deadline_timestamp: i64) -> i6
     deadline_timestamp + DEFAULT_TIMEOUT_GRACE_SECONDS
 }
 
-pub(crate) fn validate_timeout_claim(
-    pledge: &PledgeState,
-    user_signer: &str,
-    now_unix: i64,
-) -> Result<(), ContractError> {
-    if user_signer != pledge.user_pubkey {
-        return Err(ContractError::UnauthorizedUser);
-    }
-    if pledge.status != PledgeStatus::Pending {
-        return Err(ContractError::AlreadyResolved);
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anchor_lang::{prelude::*, solana_program::{account_info::AccountInfo, system_program}};
+
+    fn build_account_info(
+        key: Pubkey,
+        owner: Pubkey,
+        executable: bool,
+        is_signer: bool,
+        is_writable: bool,
+        data: Vec<u8>,
+        lamports: u64,
+    ) -> &'static AccountInfo<'static> {
+        let key = Box::leak(Box::new(key));
+        let owner = Box::leak(Box::new(owner));
+        let lamports = Box::leak(Box::new(lamports));
+        let data = Box::leak(data.into_boxed_slice());
+        Box::leak(Box::new(AccountInfo::new(
+            key, is_signer, is_writable, lamports, data, owner, executable, 0,
+        )))
     }
 
-    let timeout_at = timeout_claim_eligibility_timestamp(pledge.deadline_timestamp);
-    if now_unix < timeout_at {
-        return Err(ContractError::TimeoutNotReached);
+    fn sample_pledge_account(status: PledgeStatus) -> &'static AccountInfo<'static> {
+        let pledge = PledgeState {
+            pledge_id: "pledge-1".to_string(),
+            user_pubkey: Pubkey::new_unique().to_string(),
+            oracle_pubkey: Pubkey::new_unique().to_string(),
+            escrow_amount: 42,
+            deadline_timestamp: 1_800_000_000,
+            status,
+        };
+        let mut data = Vec::new();
+        pledge.try_serialize(&mut data).expect("serialize pledge");
+        build_account_info(Pubkey::new_unique(), crate::id(), false, false, false, data, 1)
     }
 
-    Ok(())
-}
+    fn sample_user_account() -> &'static AccountInfo<'static> {
+        build_account_info(
+            Pubkey::new_unique(),
+            system_program::ID,
+            false,
+            false,
+            true,
+            Vec::new(),
+            1,
+        )
+    }
 
-/// Implementation notes for the timeout refund helper.
-///
-/// When this becomes real CPI code, it should:
-/// 1. Receive the pledge account, the user account, and the system program.
-/// 2. Use Anchor's `system_program::transfer` with `CpiContext::with_signer`.
-/// 3. Reuse the PDA signer seeds derived in `lib.rs` so the pledge PDA can sign the CPI.
-/// 4. Move `pledge.escrow_amount` lamports from the pledge PDA back to the user.
-/// 5. Return `ContractError::InsufficientFunds` or another contract error instead of leaking Anchor errors.
-///
-/// This follows the same refund shape as the success path, but the instruction intent is
-/// user-initiated timeout recovery instead of oracle-approved success resolution.
-pub(crate) fn transfer_timeout_refund_stub() -> Result<(), ContractError> {
-    Ok(())
+    fn sample_system_program() -> &'static AccountInfo<'static> {
+        build_account_info(
+            system_program::ID,
+            system_program::ID,
+            true,
+            false,
+            false,
+            Vec::new(),
+            1,
+        )
+    }
+
+    #[test]
+    fn claim_timeout_rejects_before_grace_period() {
+        let pledge_info = sample_pledge_account(PledgeStatus::Pending);
+        let user_info = sample_user_account();
+        let system_program_info = sample_system_program();
+        let mut pledge = Account::<PledgeState>::try_from_unchecked(pledge_info).expect("build pledge account");
+        let user = SystemAccount::try_from(user_info).expect("build user account");
+        let system_program = Program::try_from(system_program_info).expect("build system program");
+        let user_signer = pledge.user_pubkey.clone();
+        let deadline_before_grace = timeout_claim_eligibility_timestamp(pledge.deadline_timestamp) - 1;
+        let signer_seed = [b"seed".as_ref(), &[1u8]];
+        let signer_seeds: &[&[&[u8]]] = &[&signer_seed];
+
+        let result = claim_timeout(
+            &mut pledge,
+            &user,
+            &system_program,
+            signer_seeds,
+            &user_signer,
+            "tx-1".to_string(),
+            deadline_before_grace,
+        );
+
+        assert!(matches!(result, Err(ContractError::TimeoutNotReached)));
+    }
+
+    #[test]
+    fn claim_timeout_rejects_already_resolved_pledge() {
+        let pledge_info = sample_pledge_account(PledgeStatus::ResolvedFailure);
+        let user_info = sample_user_account();
+        let system_program_info = sample_system_program();
+        let mut pledge = Account::<PledgeState>::try_from_unchecked(pledge_info).expect("build pledge account");
+        let user = SystemAccount::try_from(user_info).expect("build user account");
+        let system_program = Program::try_from(system_program_info).expect("build system program");
+        let user_signer = pledge.user_pubkey.clone();
+        let signer_seed = [b"seed".as_ref(), &[1u8]];
+        let signer_seeds: &[&[&[u8]]] = &[&signer_seed];
+        let timeout_at = timeout_claim_eligibility_timestamp(pledge.deadline_timestamp);
+
+        let result = claim_timeout(
+            &mut pledge,
+            &user,
+            &system_program,
+            signer_seeds,
+            &user_signer,
+            "tx-2".to_string(),
+            timeout_at,
+        );
+
+        assert!(matches!(result, Err(ContractError::AlreadyResolved)));
+    }
+
+    #[test]
+    fn claim_timeout_rejects_unauthorized_user_after_grace_period() {
+        let pledge_info = sample_pledge_account(PledgeStatus::Pending);
+        let user_info = sample_user_account();
+        let system_program_info = sample_system_program();
+        let mut pledge = Account::<PledgeState>::try_from_unchecked(pledge_info).expect("build pledge account");
+        let user = SystemAccount::try_from(user_info).expect("build user account");
+        let system_program = Program::try_from(system_program_info).expect("build system program");
+        let wrong_signer = "wrong-user".to_string();
+        let signer_seed = [b"seed".as_ref(), &[1u8]];
+        let signer_seeds: &[&[&[u8]]] = &[&signer_seed];
+        let timeout_at = timeout_claim_eligibility_timestamp(pledge.deadline_timestamp);
+
+        let result = claim_timeout(
+            &mut pledge,
+            &user,
+            &system_program,
+            signer_seeds,
+            &wrong_signer,
+            "tx-2".to_string(),
+            timeout_at,
+        );
+
+        assert!(matches!(result, Err(ContractError::UnauthorizedUser)));
+    }
+
+    #[test]
+    fn claim_timeout_accepts_deadline_boundary_without_timeout_error() {
+        let pledge_info = sample_pledge_account(PledgeStatus::Pending);
+        let user_info = sample_user_account();
+        let system_program_info = sample_system_program();
+        let mut pledge = Account::<PledgeState>::try_from_unchecked(pledge_info).expect("build pledge account");
+        let user = SystemAccount::try_from(user_info).expect("build user account");
+        let system_program = Program::try_from(system_program_info).expect("build system program");
+        let user_signer = pledge.user_pubkey.clone();
+        let signer_seed = [b"seed".as_ref(), &[1u8]];
+        let signer_seeds: &[&[&[u8]]] = &[&signer_seed];
+        let timeout_at = timeout_claim_eligibility_timestamp(pledge.deadline_timestamp);
+
+        let result = claim_timeout(
+            &mut pledge,
+            &user,
+            &system_program,
+            signer_seeds,
+            &user_signer,
+            "tx-3".to_string(),
+            timeout_at,
+        );
+
+        assert!(!matches!(result, Err(ContractError::TimeoutNotReached)));
+    }
+
+    #[test]
+    fn claim_timeout_accepts_grace_boundary_without_timeout_error() {
+        let pledge_info = sample_pledge_account(PledgeStatus::Pending);
+        let user_info = sample_user_account();
+        let system_program_info = sample_system_program();
+        let mut pledge = Account::<PledgeState>::try_from_unchecked(pledge_info).expect("build pledge account");
+        let user = SystemAccount::try_from(user_info).expect("build user account");
+        let system_program = Program::try_from(system_program_info).expect("build system program");
+        let user_signer = pledge.user_pubkey.clone();
+        let signer_seed = [b"seed".as_ref(), &[1u8]];
+        let signer_seeds: &[&[&[u8]]] = &[&signer_seed];
+        let timeout_after_grace = timeout_claim_eligibility_timestamp(pledge.deadline_timestamp) + 1;
+
+        let result = claim_timeout(
+            &mut pledge,
+            &user,
+            &system_program,
+            signer_seeds,
+            &user_signer,
+            "tx-4".to_string(),
+            timeout_after_grace,
+        );
+
+        assert!(!matches!(result, Err(ContractError::TimeoutNotReached)));
+    }
+
+    #[test]
+    fn timeout_claim_eligibility_timestamp_adds_grace_period() {
+        let deadline_timestamp = 1_800_000_000;
+
+        assert_eq!(
+            timeout_claim_eligibility_timestamp(deadline_timestamp),
+            deadline_timestamp + DEFAULT_TIMEOUT_GRACE_SECONDS
+        );
+    }
 }

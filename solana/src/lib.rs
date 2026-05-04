@@ -225,31 +225,32 @@ mod habitat_settlement_program {
     /// * Current timestamp must be >= deadline_timestamp
     /// * Pledge must still be in Pending status
     pub fn claim_timeout(ctx: Context<ClaimTimeout>) -> Result<()> {
-        let pledge = &mut ctx.accounts.pledge;
-
-        // Validate pledge state and deadline
-        if pledge.status != PledgeStatus::Pending {
-            return Err(ContractError::AlreadyResolved.into());
-        }
-
         let clock = Clock::get()?;
-        if clock.unix_timestamp < pledge.deadline_timestamp {
-            return Err(ContractError::TimeoutNotReached.into());
-        }
+        let pledge_id = ctx.accounts.pledge.pledge_id.clone();
+        let user_pubkey = ctx.accounts.user.key();
 
-        // Verify user signer
-        let user_pubkey_str = ctx.accounts.user.key().to_string();
-        require!(
-            user_pubkey_str == pledge.user_pubkey,
-            ContractError::UnauthorizedUser
+        let (seed_vecs, bump) = derive_pledge_signer_seeds(
+            &pledge_id,
+            &user_pubkey,
+            &ctx.program_id,
         );
+
+        let signer_seeds: &[&[&[u8]]] = &[&[
+            seed_vecs[0].as_slice(),
+            seed_vecs[1].as_slice(),
+            seed_vecs[2].as_slice(),
+            &[bump],
+        ]];
 
         // Execute timeout claim logic
         let _receipt = claim_timeout::claim_timeout(
-            pledge,
-            &user_pubkey_str,
-            clock.unix_timestamp,
+            &mut ctx.accounts.pledge,
+            &ctx.accounts.user,
+            &ctx.accounts.system_program,
+            signer_seeds,
+            &ctx.accounts.user.key().to_string(),
             format!("{:?}", clock), // placeholder tx_hash for local dev
+            clock.unix_timestamp,
         )?;
 
         Ok(())
@@ -329,6 +330,7 @@ pub struct ResolvePledge<'info> {
 pub struct ClaimTimeout<'info> {
     /// The user (pledge owner) claiming the timeout.
     /// #[signer] = must sign.
+    /// address constraint: must match the user_pubkey in the pledge.
     #[account(mut)]
     pub user: Signer<'info>,
 
@@ -336,4 +338,7 @@ pub struct ClaimTimeout<'info> {
     /// mut because we update its status.
     #[account(mut)]
     pub pledge: Account<'info, PledgeState>,
+
+    /// Required for CPI transfers
+    pub system_program: Program<'info, System>,
 }

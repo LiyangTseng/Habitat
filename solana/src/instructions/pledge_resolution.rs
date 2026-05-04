@@ -12,19 +12,19 @@ use crate::{
     types::PledgeStatus,
 };
 
-/// Validate that the trusted oracle signer is allowed to resolve this pledge now.
-///
-/// This is shared by both success and failure resolution paths because the same
-/// preconditions apply before either branch can continue.
-pub(crate) fn validate_oracle_resolution(
-    pledge: &PledgeState,
-    oracle_signer: &str,
+/// Validate that a pledge hasn't been resolved and the signer matches the expected key for this pledge action.
+pub(crate) fn validate_pledge_authorized(
+    status: &PledgeStatus,
+    signer: &str,
+    expected_signer: &str,
+    error: ContractError,
 ) -> Result<(), ContractError> {
-    if oracle_signer != pledge.oracle_pubkey {
-        return Err(ContractError::UnauthorizedOracle);
-    }
-    if pledge.status != PledgeStatus::Pending {
+    if status != &PledgeStatus::Pending {
         return Err(ContractError::AlreadyResolved);
+    }
+
+    if signer != expected_signer {
+        return Err(error);
     }
 
     Ok(())
@@ -85,7 +85,7 @@ pub(crate) fn apply_resolution<'info, D>(
     destination: &D,
     system_program: &Program<'info, System>,
     signer_seeds: &[&[&[u8]]],
-    resolved_by: &str,
+    oracle_signer: &str,
     status: PledgeStatus,
     tx_hash: String,
     finalized_at_unix: i64,
@@ -93,14 +93,104 @@ pub(crate) fn apply_resolution<'info, D>(
 where
     D: ToAccountInfo<'info>,
 {
-    validate_oracle_resolution(pledge, resolved_by)?;
+    validate_pledge_authorized(
+        &pledge.status,
+        oracle_signer,
+        &pledge.oracle_pubkey,
+        ContractError::UnauthorizedOracle
+    )?;
     transfer_escrow(pledge, destination, system_program, signer_seeds)?;
     update_pledge_status(pledge, status);
 
     Ok(build_resolution_receipt(
         pledge,
-        resolved_by,
+        oracle_signer,
         tx_hash,
         finalized_at_unix,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_pledge(status: PledgeStatus) -> PledgeState {
+        PledgeState {
+            pledge_id: "pledge-1".to_string(),
+            user_pubkey: "user-pubkey".to_string(),
+            oracle_pubkey: "oracle-pubkey".to_string(),
+            escrow_amount: 42,
+            deadline_timestamp: 1_800_000_000,
+            status,
+        }
+    }
+
+    #[test]
+    fn validate_pledge_authorized_allows_pending_matching_signer() {
+        let pledge = sample_pledge(PledgeStatus::Pending);
+
+        let result = validate_pledge_authorized(
+            &pledge.status,
+            "oracle-pubkey",
+            &pledge.oracle_pubkey,
+            ContractError::UnauthorizedOracle,
+        );
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_pledge_authorized_rejects_wrong_signer() {
+        let pledge = sample_pledge(PledgeStatus::Pending);
+
+        let result = validate_pledge_authorized(
+            &pledge.status,
+            "someone-else",
+            &pledge.oracle_pubkey,
+            ContractError::UnauthorizedOracle,
+        );
+
+        assert_eq!(result, Err(ContractError::UnauthorizedOracle));
+    }
+
+    #[test]
+    fn validate_pledge_authorized_rejects_resolved_pledge() {
+        let pledge = sample_pledge(PledgeStatus::ResolvedSuccess);
+
+        let result = validate_pledge_authorized(
+            &pledge.status,
+            "oracle-pubkey",
+            &pledge.oracle_pubkey,
+            ContractError::UnauthorizedOracle,
+        );
+
+        assert_eq!(result, Err(ContractError::AlreadyResolved));
+    }
+
+    #[test]
+    fn update_pledge_status_sets_new_value() {
+        let mut pledge = sample_pledge(PledgeStatus::Pending);
+
+        update_pledge_status(&mut pledge, PledgeStatus::ResolvedFailure);
+
+        assert_eq!(pledge.status, PledgeStatus::ResolvedFailure);
+    }
+
+    #[test]
+    fn build_resolution_receipt_uses_current_pledge_status() {
+        let pledge = sample_pledge(PledgeStatus::ResolvedFailure);
+
+        let receipt = build_resolution_receipt(
+            &pledge,
+            "oracle-pubkey",
+            "tx-123".to_string(),
+            1_800_000_123,
+        );
+
+        assert_eq!(receipt.pledge_id, "pledge-1");
+        assert_eq!(receipt.resolved_by, "oracle-pubkey");
+        assert_eq!(receipt.resolution, PledgeStatus::ResolvedFailure);
+        assert_eq!(receipt.tx_hash, "tx-123");
+        assert_eq!(receipt.finalized_at_unix, 1_800_000_123);
+    }
 }
