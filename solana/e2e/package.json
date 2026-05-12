@@ -1,0 +1,18 @@
+{
+  "name": "habitat-e2e",
+  "version": "1.0.0",
+  "description": "End-to-end tests for Habitat Settlement Program",
+  "main": "e2e.ts",
+  "scripts": {
+    "test": "ts-node e2e.ts"
+  },
+  "dependencies": {
+    "@coral-xyz/anchor": "^0.32.1",
+    "@solana/web3.js": "^1.95.0"
+  },
+  "devDependencies": {
+    "@types/bn.js": "^5.2.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
+  }
+}

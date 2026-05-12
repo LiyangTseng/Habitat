@@ -1,11 +1,6 @@
 //! Shared helpers for pledge resolution outcomes: validation, status updates, receipts, and escrow transfers.
 
-use anchor_lang::{
-    prelude::{Account, CpiContext, Program, System},
-    system_program::{transfer, Transfer},
-    ToAccountInfo,
-};
-
+use anchor_lang::prelude::{Account, AccountInfo, ToAccountInfo};
 use crate::{
     error::ContractError,
     state::{pledge_state::PledgeState, resolution_receipt::ResolutionReceipt},
@@ -56,50 +51,58 @@ pub(crate) fn build_resolution_receipt(
     }
 }
 
-/// Transfer escrow lamports from the pledge PDA to a destination account.
-pub(crate) fn transfer_escrow<'info, D>(
+/// Transfer native SOL (lamports) directly from the pledge PDA to a destination account.
+///
+/// Because the program owns the pledge PDA, we bypass the System Program (CPI)
+/// and directly manipulate the lamport balances. This solves the Solana constraint
+/// of not being able to CPI transfer from an account containing data.
+pub(crate) fn transfer_escrow<'info>(
     pledge: &Account<'info, PledgeState>,
-    destination: &D,
-    system_program: &Program<'info, System>,
-    signer_seeds: &[&[&[u8]]],
-) -> Result<(), ContractError>
-where
-    D: ToAccountInfo<'info>,
-{
-    let cpi_accounts = Transfer {
-        from: pledge.to_account_info(),
-        to: destination.to_account_info(),
-    };
+    destination: &AccountInfo<'info>,
+) -> Result<(), ContractError> {
+    let amount = pledge.escrow_amount;
 
-    let cpi_context = CpiContext::new(system_program.to_account_info(), cpi_accounts)
-        .with_signer(signer_seeds);
+    // Safely deduct lamports from the PDA
+    **pledge
+        .to_account_info()
+        .try_borrow_mut_lamports()
+        .map_err(|_| ContractError::InvalidInstruction)? = pledge
+        .to_account_info()
+        .lamports()
+        .checked_sub(amount)
+        .ok_or(ContractError::InvalidInstruction)?; // Fallback error if math fails
 
-    transfer(cpi_context, pledge.escrow_amount)
-        .map_err(|_| ContractError::InsufficientFunds)?;
+    // Safely add lamports to the destination (user or oracle)
+    **destination
+        .try_borrow_mut_lamports()
+        .map_err(|_| ContractError::InvalidInstruction)? = destination
+        .lamports()
+        .checked_add(amount)
+        .ok_or(ContractError::InvalidInstruction)?;
+
     Ok(())
 }
 
 /// Apply a full resolution flow: validate, transfer, update status, and build receipt.
-pub(crate) fn apply_resolution<'info, D>(
+pub(crate) fn apply_resolution<'info>(
     pledge: &mut Account<'info, PledgeState>,
-    destination: &D,
-    system_program: &Program<'info, System>,
-    signer_seeds: &[&[&[u8]]],
+    destination: &AccountInfo<'info>,
     oracle_signer: &str,
     status: PledgeStatus,
     tx_hash: String,
     finalized_at_unix: i64,
-) -> Result<ResolutionReceipt, ContractError>
-where
-    D: ToAccountInfo<'info>,
-{
+) -> Result<ResolutionReceipt, ContractError> {
     validate_pledge_authorized(
         &pledge.status,
         oracle_signer,
         &pledge.oracle_pubkey,
         ContractError::UnauthorizedOracle
     )?;
-    transfer_escrow(pledge, destination, system_program, signer_seeds)?;
+
+    // Execute the direct lamport transfer
+    transfer_escrow(pledge, destination)?;
+
+    // Update the state machine
     update_pledge_status(pledge, status);
 
     Ok(build_resolution_receipt(

@@ -1,7 +1,7 @@
 //! Resolve a pledge as failure using oracle authority.
 
 use anchor_lang::{
-    prelude::{Account, Program, System, SystemAccount},
+    prelude::{Account, SystemAccount},
 };
 use crate::{
     error::ContractError,
@@ -13,8 +13,6 @@ use crate::{
 pub(crate) fn resolve_failure<'info>(
     pledge: &mut Account<'info, PledgeState>,
     penalty_pool: &SystemAccount<'info>,
-    system_program: &Program<'info, System>,
-    signer_seeds: &[&[&[u8]]],
     oracle_signer: &str,
     tx_hash: String,
     finalized_at_unix: i64,
@@ -22,8 +20,6 @@ pub(crate) fn resolve_failure<'info>(
     apply_resolution(
         pledge,
         penalty_pool,
-        system_program,
-        signer_seeds,
         oracle_signer,
         PledgeStatus::ResolvedFailure,
         tx_hash,
@@ -50,7 +46,7 @@ mod tests {
         let lamports = Box::leak(Box::new(lamports));
         let data = Box::leak(data.into_boxed_slice());
         Box::leak(Box::new(AccountInfo::new(
-            key, is_signer, is_writable, lamports, data, owner, executable, 0,
+            key, is_signer, is_writable, lamports, data, owner, executable,
         )))
     }
 
@@ -80,34 +76,16 @@ mod tests {
         )
     }
 
-    fn sample_system_program() -> &'static AccountInfo<'static> {
-        build_account_info(
-            system_program::ID,
-            system_program::ID,
-            true,
-            false,
-            false,
-            Vec::new(),
-            1,
-        )
-    }
-
     #[test]
     fn resolve_failure_rejects_unauthorized_oracle_before_transfer() {
         let pledge_info = sample_pledge_account(PledgeStatus::Pending);
         let penalty_pool_info = sample_penalty_pool();
-        let system_program_info = sample_system_program();
         let mut pledge = Account::<PledgeState>::try_from_unchecked(pledge_info).expect("build pledge account");
         let penalty_pool = SystemAccount::try_from(penalty_pool_info).expect("build penalty pool");
-        let system_program = Program::try_from(system_program_info).expect("build system program");
-        let signer_seed = [b"seed".as_ref(), &[1u8]];
-        let signer_seeds: &[&[&[u8]]] = &[&signer_seed];
 
         let result = resolve_failure(
             &mut pledge,
             &penalty_pool,
-            &system_program,
-            signer_seeds,
             "not-the-oracle",
             "tx-1".to_string(),
             1_800_000_001,
@@ -120,18 +98,12 @@ mod tests {
     fn resolve_failure_rejects_already_resolved_pledge() {
         let pledge_info = sample_pledge_account(PledgeStatus::ResolvedFailure);
         let penalty_pool_info = sample_penalty_pool();
-        let system_program_info = sample_system_program();
         let mut pledge = Account::<PledgeState>::try_from_unchecked(pledge_info).expect("build pledge account");
         let penalty_pool = SystemAccount::try_from(penalty_pool_info).expect("build penalty pool");
-        let system_program = Program::try_from(system_program_info).expect("build system program");
-        let signer_seed = [b"seed".as_ref(), &[1u8]];
-        let signer_seeds: &[&[&[u8]]] = &[&signer_seed];
 
         let result = resolve_failure(
             &mut pledge,
             &penalty_pool,
-            &system_program,
-            signer_seeds,
             "oracle-pubkey",
             "tx-2".to_string(),
             1_800_000_002,

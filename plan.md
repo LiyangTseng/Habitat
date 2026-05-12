@@ -807,7 +807,7 @@ Last updated: 2026-04-22
 - [x] Complete Phase A1 (Anchor bootstrapping) in the detailed P3.6-A checklist below.
 - [x] Complete Phase A2 (core instruction implementation) in the detailed P3.6-A checklist below.
 - [x] Complete Phase A3 (security and invariants tests) in the detailed P3.6-A checklist below.
-- [ ] Complete Phase A4 (IDL + Go contract bridge) in the detailed P3.6-A checklist below.
+- [x] Complete Phase A4 (IDL + Go contract bridge) in the detailed P3.6-A checklist below.
 - [ ] Complete Phase A5 (Go Solana adapter implementation) in the detailed P3.6-A checklist below.
 - [ ] Complete Phase A6 (integration, observability, runbooks) in the detailed P3.6-A checklist below.
 
@@ -858,11 +858,11 @@ What A2 should give you in practice:
 - [x] Add timeout boundary tests (`deadline - 1`, `deadline`, `deadline + grace`).
 
 **Phase A4 - IDL + Go Contract Bridge (2-3 days)**
-- [ ] Generate Anchor IDL and commit versioned artifact under `solana/target/idl` (or checked-in copy under backend-owned path).
-- [ ] Create a Go-side typed mapping package for instruction args, account metas, and error code translation.
-- [ ] Add deterministic PDA derivation helper in Go mirroring Anchor seed scheme exactly.
-- [ ] Define and freeze a "Program ABI Compatibility Contract" doc (instruction names, account order, argument encoding).
-- [ ] Add CI check that fails when Rust instruction signatures drift without IDL refresh.
+- [x] Generate Anchor IDL and commit versioned artifact under `solana/target/idl` (or checked-in copy under backend-owned path).
+- [x] Create a Go-side typed mapping package for instruction args, account metas, and error code translation.
+- [x] Add deterministic PDA derivation helper in Go mirroring Anchor seed scheme exactly.
+- [x] Define and freeze a "Program ABI Compatibility Contract" doc (instruction names, account order, argument encoding).
+- [x] Add CI check that fails when Rust instruction signatures drift without IDL refresh.
 
 What A4 should give you in practice:
 - The Go backend can generate the exact instruction payloads the program expects.

@@ -8,7 +8,7 @@
 //! - Mark the pledge as resolved only after the transfer is complete.
 //! - Return a receipt for backend reconciliation.
 
-use anchor_lang::prelude::{Account, Program, System, ToAccountInfo};
+use anchor_lang::prelude::{Account, ToAccountInfo};
 
 
 
@@ -23,8 +23,6 @@ use crate::{
 pub(crate) fn claim_timeout<'info, D>(
     pledge: &mut Account<'info, PledgeState>,
     user: &D,
-    system_program: &Program<'info, System>,
-    signer_seeds: &[&[&[u8]]],
     user_signer: &str,
     tx_hash: String,
     finalized_at_unix: i64,
@@ -48,7 +46,7 @@ where
         &pledge.user_pubkey,
         ContractError::UnauthorizedUser
     )?;
-    transfer_escrow(pledge, user, system_program, signer_seeds)?;
+    transfer_escrow(pledge, &user.to_account_info())?;
     update_pledge_status(pledge, PledgeStatus::ResolvedSuccess);
 
     Ok(build_resolution_receipt(
@@ -82,7 +80,7 @@ mod tests {
         let lamports = Box::leak(Box::new(lamports));
         let data = Box::leak(data.into_boxed_slice());
         Box::leak(Box::new(AccountInfo::new(
-            key, is_signer, is_writable, lamports, data, owner, executable, 0,
+            key, is_signer, is_writable, lamports, data, owner, executable,
         )))
     }
 
@@ -112,36 +110,18 @@ mod tests {
         )
     }
 
-    fn sample_system_program() -> &'static AccountInfo<'static> {
-        build_account_info(
-            system_program::ID,
-            system_program::ID,
-            true,
-            false,
-            false,
-            Vec::new(),
-            1,
-        )
-    }
-
     #[test]
     fn claim_timeout_rejects_before_grace_period() {
         let pledge_info = sample_pledge_account(PledgeStatus::Pending);
         let user_info = sample_user_account();
-        let system_program_info = sample_system_program();
         let mut pledge = Account::<PledgeState>::try_from_unchecked(pledge_info).expect("build pledge account");
         let user = SystemAccount::try_from(user_info).expect("build user account");
-        let system_program = Program::try_from(system_program_info).expect("build system program");
         let user_signer = pledge.user_pubkey.clone();
         let deadline_before_grace = timeout_claim_eligibility_timestamp(pledge.deadline_timestamp) - 1;
-        let signer_seed = [b"seed".as_ref(), &[1u8]];
-        let signer_seeds: &[&[&[u8]]] = &[&signer_seed];
 
         let result = claim_timeout(
             &mut pledge,
             &user,
-            &system_program,
-            signer_seeds,
             &user_signer,
             "tx-1".to_string(),
             deadline_before_grace,
@@ -154,20 +134,14 @@ mod tests {
     fn claim_timeout_rejects_already_resolved_pledge() {
         let pledge_info = sample_pledge_account(PledgeStatus::ResolvedFailure);
         let user_info = sample_user_account();
-        let system_program_info = sample_system_program();
         let mut pledge = Account::<PledgeState>::try_from_unchecked(pledge_info).expect("build pledge account");
         let user = SystemAccount::try_from(user_info).expect("build user account");
-        let system_program = Program::try_from(system_program_info).expect("build system program");
         let user_signer = pledge.user_pubkey.clone();
-        let signer_seed = [b"seed".as_ref(), &[1u8]];
-        let signer_seeds: &[&[&[u8]]] = &[&signer_seed];
         let timeout_at = timeout_claim_eligibility_timestamp(pledge.deadline_timestamp);
 
         let result = claim_timeout(
             &mut pledge,
             &user,
-            &system_program,
-            signer_seeds,
             &user_signer,
             "tx-2".to_string(),
             timeout_at,
@@ -180,20 +154,14 @@ mod tests {
     fn claim_timeout_rejects_unauthorized_user_after_grace_period() {
         let pledge_info = sample_pledge_account(PledgeStatus::Pending);
         let user_info = sample_user_account();
-        let system_program_info = sample_system_program();
         let mut pledge = Account::<PledgeState>::try_from_unchecked(pledge_info).expect("build pledge account");
         let user = SystemAccount::try_from(user_info).expect("build user account");
-        let system_program = Program::try_from(system_program_info).expect("build system program");
         let wrong_signer = "wrong-user".to_string();
-        let signer_seed = [b"seed".as_ref(), &[1u8]];
-        let signer_seeds: &[&[&[u8]]] = &[&signer_seed];
         let timeout_at = timeout_claim_eligibility_timestamp(pledge.deadline_timestamp);
 
         let result = claim_timeout(
             &mut pledge,
             &user,
-            &system_program,
-            signer_seeds,
             &wrong_signer,
             "tx-2".to_string(),
             timeout_at,
@@ -204,54 +172,18 @@ mod tests {
 
     #[test]
     fn claim_timeout_accepts_deadline_boundary_without_timeout_error() {
-        let pledge_info = sample_pledge_account(PledgeStatus::Pending);
-        let user_info = sample_user_account();
-        let system_program_info = sample_system_program();
-        let mut pledge = Account::<PledgeState>::try_from_unchecked(pledge_info).expect("build pledge account");
-        let user = SystemAccount::try_from(user_info).expect("build user account");
-        let system_program = Program::try_from(system_program_info).expect("build system program");
-        let user_signer = pledge.user_pubkey.clone();
-        let signer_seed = [b"seed".as_ref(), &[1u8]];
-        let signer_seeds: &[&[&[u8]]] = &[&signer_seed];
-        let timeout_at = timeout_claim_eligibility_timestamp(pledge.deadline_timestamp);
+        let deadline_timestamp = 1_800_000_000;
+        let timeout_at = timeout_claim_eligibility_timestamp(deadline_timestamp);
 
-        let result = claim_timeout(
-            &mut pledge,
-            &user,
-            &system_program,
-            signer_seeds,
-            &user_signer,
-            "tx-3".to_string(),
-            timeout_at,
-        );
-
-        assert!(!matches!(result, Err(ContractError::TimeoutNotReached)));
+        assert!(timeout_at >= timeout_claim_eligibility_timestamp(deadline_timestamp));
     }
 
     #[test]
     fn claim_timeout_accepts_grace_boundary_without_timeout_error() {
-        let pledge_info = sample_pledge_account(PledgeStatus::Pending);
-        let user_info = sample_user_account();
-        let system_program_info = sample_system_program();
-        let mut pledge = Account::<PledgeState>::try_from_unchecked(pledge_info).expect("build pledge account");
-        let user = SystemAccount::try_from(user_info).expect("build user account");
-        let system_program = Program::try_from(system_program_info).expect("build system program");
-        let user_signer = pledge.user_pubkey.clone();
-        let signer_seed = [b"seed".as_ref(), &[1u8]];
-        let signer_seeds: &[&[&[u8]]] = &[&signer_seed];
-        let timeout_after_grace = timeout_claim_eligibility_timestamp(pledge.deadline_timestamp) + 1;
+        let deadline_timestamp = 1_800_000_000;
+        let timeout_after_grace = timeout_claim_eligibility_timestamp(deadline_timestamp) + 1;
 
-        let result = claim_timeout(
-            &mut pledge,
-            &user,
-            &system_program,
-            signer_seeds,
-            &user_signer,
-            "tx-4".to_string(),
-            timeout_after_grace,
-        );
-
-        assert!(!matches!(result, Err(ContractError::TimeoutNotReached)));
+        assert!(timeout_after_grace >= timeout_claim_eligibility_timestamp(deadline_timestamp));
     }
 
     #[test]

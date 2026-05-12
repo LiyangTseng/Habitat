@@ -23,21 +23,11 @@ use instructions::{
     claim_timeout, initialize_pledge, resolve_failure, resolve_success,
 };
 
-fn derive_pledge_signer_seeds(pledge_id: &str, user: &Pubkey, program_id: &Pubkey) -> (Vec<Vec<u8>>, u8) {
-    let seed_prefix = b"pledge".to_vec();
-    let user_bytes = user.to_bytes().to_vec();
-    let pledge_bytes = pledge_id.as_bytes().to_vec();
-    let seeds_refs: Vec<&[u8]> = vec![seed_prefix.as_slice(), user_bytes.as_slice(), pledge_bytes.as_slice()];
-    let (_pda, bump) = Pubkey::find_program_address(&seeds_refs, program_id);
-    (vec![seed_prefix, user_bytes, pledge_bytes], bump)
-}
 
 struct OracleResolutionPrep {
     oracle_pubkey_str: String,
     pledge_id: String,
     finalized_at_unix: i64,
-    seed_vecs: Vec<Vec<u8>>,
-    bump_arr: [u8; 1],
 }
 
 fn prepare_oracle_resolution(ctx: &Context<ResolvePledge>) -> Result<OracleResolutionPrep> {
@@ -45,18 +35,10 @@ fn prepare_oracle_resolution(ctx: &Context<ResolvePledge>) -> Result<OracleResol
     let pledge_id = ctx.accounts.pledge.pledge_id.clone();
     let finalized_at_unix = Clock::get()?.unix_timestamp;
 
-    let (seed_vecs, bump) = derive_pledge_signer_seeds(
-        &pledge_id,
-        &ctx.accounts.user.key(),
-        &ctx.program_id,
-    );
-
     Ok(OracleResolutionPrep {
         oracle_pubkey_str,
         pledge_id,
         finalized_at_unix,
-        seed_vecs,
-        bump_arr: [bump],
     })
 }
 
@@ -66,7 +48,7 @@ fn prepare_oracle_resolution(ctx: &Context<ResolvePledge>) -> Result<OracleResol
 
 // The public key that identifies this program on-chain.
 // Derived from solana/.localnet/keypairs/habitat-settlement-program-keypair.json
-declare_id!("GyDwfPjDJ61P8wxQ7EMFyARuoh5Yeuyn58aCSTb2zx28");
+declare_id!("BgNjXioQqVNNihH4QCtjthDKAynZLVDixArQgmY7oRM4");
 
 // ============================================================================
 // ANCHOR PROGRAM ENTRY POINT
@@ -152,19 +134,11 @@ mod habitat_settlement_program {
         resolution_proof: String,
     ) -> Result<()> {
         let prep = prepare_oracle_resolution(&ctx)?;
-        let signer_seeds: &[&[&[u8]]] = &[&[
-            prep.seed_vecs[0].as_slice(),
-            prep.seed_vecs[1].as_slice(),
-            prep.seed_vecs[2].as_slice(),
-            &prep.bump_arr,
-        ]];
 
         // Execute resolution logic
         let _receipt = resolve_success::resolve_success(
             &mut ctx.accounts.pledge,
             &ctx.accounts.user,
-            &ctx.accounts.system_program,
-            signer_seeds,
             &prep.oracle_pubkey_str,
             resolution_proof.clone(),
             prep.finalized_at_unix,
@@ -190,19 +164,11 @@ mod habitat_settlement_program {
         resolution_proof: String,
     ) -> Result<()> {
         let prep = prepare_oracle_resolution(&ctx)?;
-        let signer_seeds: &[&[&[u8]]] = &[&[
-            prep.seed_vecs[0].as_slice(),
-            prep.seed_vecs[1].as_slice(),
-            prep.seed_vecs[2].as_slice(),
-            &prep.bump_arr,
-        ]];
 
         // Execute resolution logic
         let _receipt = resolve_failure::resolve_failure(
             &mut ctx.accounts.pledge,
             &ctx.accounts.penalty_pool,
-            &ctx.accounts.system_program,
-            signer_seeds,
             &prep.oracle_pubkey_str,
             resolution_proof.clone(),
             prep.finalized_at_unix,
@@ -226,28 +192,11 @@ mod habitat_settlement_program {
     /// * Pledge must still be in Pending status
     pub fn claim_timeout(ctx: Context<ClaimTimeout>) -> Result<()> {
         let clock = Clock::get()?;
-        let pledge_id = ctx.accounts.pledge.pledge_id.clone();
-        let user_pubkey = ctx.accounts.user.key();
-
-        let (seed_vecs, bump) = derive_pledge_signer_seeds(
-            &pledge_id,
-            &user_pubkey,
-            &ctx.program_id,
-        );
-
-        let signer_seeds: &[&[&[u8]]] = &[&[
-            seed_vecs[0].as_slice(),
-            seed_vecs[1].as_slice(),
-            seed_vecs[2].as_slice(),
-            &[bump],
-        ]];
 
         // Execute timeout claim logic
         let _receipt = claim_timeout::claim_timeout(
             &mut ctx.accounts.pledge,
             &ctx.accounts.user,
-            &ctx.accounts.system_program,
-            signer_seeds,
             &ctx.accounts.user.key().to_string(),
             format!("{:?}", clock), // placeholder tx_hash for local dev
             clock.unix_timestamp,
