@@ -1,4 +1,5 @@
 # Habitat
+[![Solana IDL Check](https://github.com/LiyangTseng/Habitat/actions/workflows/idl-check.yml/badge.svg)](https://github.com/LiyangTseng/Habitat/actions/workflows/idl-check.yml)
 
 An accountability platform for building lasting habits through community commitments and on-chain settlement.
 

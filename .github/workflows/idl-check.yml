@@ -22,8 +22,13 @@ jobs:
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install Anchor CLI
-        run: cargo install --git https://github.com/coral-xyz/anchor --tag v0.31.0 anchor-cli --locked
+      - name: Install Anchor Version Manager
+        run: cargo install --git https://github.com/coral-xyz/anchor avm --locked --force
+
+      - name: Install and select Anchor CLI version
+        run: |
+          avm install 1.0.2
+          avm use 1.0.2
 
       - name: Install Linux build dependencies
         run: |
