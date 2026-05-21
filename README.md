@@ -148,7 +148,7 @@ anchor deploy --provider.cluster devnet
 
 #### Backend Integration Test
 ### Prepration: Set up Solana env vars in backend
-Check [backend/README.md](backend/README.md) for instructions on exporting the necessary environment variables for the backend to interact with the local Solana validator.
+Check [backend/README.md](https://github.com/daniel0321forever/terriyaki-go/) for instructions on exporting the necessary environment variables for the backend to interact with the local Solana validator.
 
 
 ### Pledge Lifecycle Diagram
