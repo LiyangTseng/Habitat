@@ -39,6 +39,8 @@ jobs:
         run: |
           sh -c "$(curl -sSfL https://release.anza.xyz/v3.1.14/install)"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+          # Explicitly export the path for this temporary shell instance to pass the version check
+          export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
           solana --version
 
       - name: Materialize program keypair for verifiable build
