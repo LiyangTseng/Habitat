@@ -35,6 +35,38 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y pkg-config build-essential libudev-dev libssl-dev
 
+      - name: Materialize program keypair for verifiable build
+        working-directory: solana
+        env:
+          SOLANA_PROGRAM_KEYPAIR_JSON: ${{ secrets.SOLANA_PROGRAM_KEYPAIR_JSON }}
+        run: |
+          if [ -z "$SOLANA_PROGRAM_KEYPAIR_JSON" ]; then
+            echo "Missing required secret: SOLANA_PROGRAM_KEYPAIR_JSON"
+            exit 1
+          fi
+
+          mkdir -p target/deploy
+          printf '%s' "$SOLANA_PROGRAM_KEYPAIR_JSON" > target/deploy/habitat_settlement_program-keypair.json
+          chmod 600 target/deploy/habitat_settlement_program-keypair.json
+
+      - name: Validate program keypair matches declared program ID
+        working-directory: solana
+        run: |
+          declared_program_id=$(sed -n 's/^declare_id!("\([^"]*\)");$/\1/p' src/lib.rs | head -n 1)
+          keypair_program_id=$(solana-keygen pubkey target/deploy/habitat_settlement_program-keypair.json)
+
+          if [ -z "$declared_program_id" ]; then
+            echo "Unable to read program ID from src/lib.rs"
+            exit 1
+          fi
+
+          if [ "$declared_program_id" != "$keypair_program_id" ]; then
+            echo "Program ID mismatch before build:"
+            echo "  Source code has:  $declared_program_id"
+            echo "  Keypair file has: $keypair_program_id"
+            exit 1
+          fi
+
       - name: Build Anchor program in Docker
         working-directory: solana
         env:
