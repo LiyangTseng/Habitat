@@ -146,6 +146,11 @@ anchor deploy --provider.cluster devnet
 # Then update frontend/src/config/config.tsx with devnet program ID
 ```
 
+#### Backend Integration Test
+### Prepration: Set up Solana env vars in backend
+Check [backend/README.md](backend/README.md) for instructions on exporting the necessary environment variables for the backend to interact with the local Solana validator.
+
+
 ### Pledge Lifecycle Diagram
 
 ```

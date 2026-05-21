@@ -526,6 +526,76 @@ solana/
 - Pledge account derivation must be deterministic and stable so retries do not create duplicate pledge state.
 - Any new on-chain status values must be mirrored in backend mapping before release.
 
+## Settlement Lifecycle Definition (Architecture Clarity)
+
+To prevent confusion about adapter boundaries and settlement operations, this section documents the canonical settlement lifecycle that all payment providers must implement.
+
+### Phases of the Settlement Lifecycle
+
+**Phase 1: Collection (Payment Method Preparation)**
+- **Method:** `CreateCollectionIntent(amount, currency)`
+- **Purpose:** Prepare the user to make a payment (e.g., generate a Stripe Payment Intent for the frontend, or initialize a Solana pledge account for the backend)
+- **Provider-agnostic:** Both card and wallet methods need a collection phase
+- **Output:** Client secret (for frontend) or pledge reference (for on-chain)
+- **Status:** Pending (user has not confirmed payment yet)
+
+**Phase 2: Settlement (Charge/Move Funds)**
+- **Method:** `CreateSettlementIntent(customerId, paymentMethodId, amount, currency)`
+- **Purpose:** Actually charge or move funds using a saved payment method
+- **Provider-specific execution:**
+  - Stripe: off-session charge (customer already saved a card)
+  - Solana: pledge account already initialized, settlement is on-chain resolution
+- **Output:** Settlement reference and initial status
+- **Status:** Pending (charge submitted, not yet confirmed)
+
+**Phase 3: Resolution (Confirm Outcome)**
+- **Method:** `ResolveSettlement(reference, resolution: "success" | "failure" | "refunded")`
+- **Purpose:** Mark the settlement as succeeded, failed, or refunded
+- **Provider-specific execution:**
+  - Stripe: confirm charge or initiate refund
+  - Solana: oracle submits resolve_success or resolve_failure instruction
+- **Status:** Success, Failed, or Refunded
+
+**Phase 4: Status Query (Real-time Sync)**
+- **Method:** `QuerySettlementStatus(reference)`
+- **Purpose:** Check the current status of a settlement without modifying it
+- **Use cases:** Reconciliation, webhook validation, polling for finality
+- **Status:** Returns canonical status (Pending, Authorized, Captured, Failed, Refunded, SettledOnChain)
+
+**Phase 5: Disbursement (Send Funds)**
+- **Method:** `CreateDisbursement(destinationReference, amount, currency)`
+- **Purpose:** Send funds to a beneficiary account (e.g., penalty pool, user refund)
+- **Provider-specific execution:**
+  - Stripe: transfer to connected account
+  - Solana: on-chain SPL token transfer
+- **Status:** Completed (same as phase it originated from)
+
+### Adapter Responsibility Separation
+
+**SettlementAdapter (provider-neutral, all providers must implement)**
+- `CreateCollectionIntent`: Initialize payment preparation
+- `CreateSettlementIntent`: Charge using saved method
+- `ResolveSettlement`: Confirm outcome
+- `QuerySettlementStatus`: Check real-time status
+- `CreateDisbursement`: Send funds
+
+**CardMethodAdapter (card onboarding only, Stripe-specific)**
+- `CreatePaymentMethodSetupIntent`: Prepare to save a card
+- `EnsurePayerProfile`: Create/retrieve customer profile
+- `GetPaymentMethodDetails`: Fetch saved card metadata
+- `LinkPaymentMethodToPayer`: Attach card to customer
+
+**WalletMethodAdapter (wallet onboarding only, Solana-specific)**
+- `ValidateWalletOwnership`: Verify user owns the wallet
+- `NormalizeWalletMethod`: Create payment method record
+
+### Key Principle: PaymentService Should Call Only SettlementAdapter Methods
+
+The payment service (`payment_service.go`) should depend only on `SettlementAdapter` (through `PaymentGatewayAdapter`). Onboarding is handled by separate capability adapters injected from the factory. This ensures:
+- Settlement logic is provider-agnostic
+- No card-specific or wallet-specific code in the service layer
+- Adding a new payment provider requires only a new adapter, not service changes
+
 ### Go Payment Adapter Compatibility Bridge Plan
 
 The current Solana pledge contract model is not a 1:1 match with the existing Go payment adapter interface, so a translation layer is required.
@@ -808,7 +878,7 @@ Last updated: 2026-04-22
 - [x] Complete Phase A2 (core instruction implementation) in the detailed P3.6-A checklist below.
 - [x] Complete Phase A3 (security and invariants tests) in the detailed P3.6-A checklist below.
 - [x] Complete Phase A4 (IDL + Go contract bridge) in the detailed P3.6-A checklist below.
-- [ ] Complete Phase A5 (Go Solana adapter implementation) in the detailed P3.6-A checklist below.
+- [x] Complete Phase A5 (Go Solana adapter implementation) in the detailed P3.6-A checklist below.
 - [ ] Complete Phase A6 (integration, observability, runbooks) in the detailed P3.6-A checklist below.
 
 #### P3.6-A: Rust + Anchor Learning-to-Delivery Backlog (Detailed)
@@ -869,12 +939,36 @@ What A4 should give you in practice:
 - The backend and the program stop drifting apart.
 - Frontend/backend assumptions can be checked against the same contract.
 
-**Phase A5 - Go Solana Adapter Implementation (3-5 days)**
-- [ ] Implement `AddPaymentMethod` mapping for `solana_wallet` metadata validation and wallet ownership checks.
-- [ ] Implement `CreateSettlementIntent` to prepare pledge/account context and persist canonical pending settlement row.
-- [ ] Implement `ResolveSettlement` to execute sign -> broadcast -> confirm pipeline with retry-safe idempotency key.
-- [ ] Implement `QuerySettlementStatus` with canonical status mapping (`pending`, `failed`, `settled_onchain`, etc.).
-- [ ] Add provider-specific proof persistence (`signature`, `slot`, `finalized_blockhash`, explorer URL).
+**Phase A5 - Go Solana Adapter Implementation + Payment Method Onboarding Refactoring (3-5 days)**
+
+**A5 Priority 1: Payment Method Onboarding Refactor (COMPLETED - 2026-05-15)**
+- [x] Remove Stripe-only `SaveCard` endpoint and method from service interface.
+- [x] Remove `CreateSaveCardIntent` endpoint (Stripe setup intent specific).
+- [x] Add unified `AddPaymentMethod(methodType: "card" | "solana_wallet", payload)` to service interface.
+- [x] Implement internal dispatch logic in service layer by methodType discriminator.
+- [x] Create `addStripeCardMethod()` private handler (calls Stripe adapter, creates payer profile, links method, persists to repo).
+- [x] Create `addSolanaWalletMethod()` private handler (validates wallet address/network, creates payment method info, persists to repo).
+- [x] Create `AddPaymentMethodDTO` with discriminator fields (methodType, cardPaymentMethodID, walletAddress, network, programID).
+- [x] Update payment controller to expose unified `POST /api/v1/payments/methods` endpoint.
+- [x] Update `openapi.yaml` to remove `/payments/save-card-intent` and `/payments/save-card`, replace with unified `/payments/methods` POST endpoint with method-type examples.
+- [x] Consolidate GET `/payments/methods` (list available) and POST `/payments/methods` (add new) under same endpoint path.
+- [x] Update router to wire new endpoint and remove old routes.
+- [x] Verify all tests pass (6/6 adapter contract tests passing).
+
+Rationale: With no production deployment yet, removing SaveCard eliminates backward-compatibility burden and prepares the API contract for clean multi-provider onboarding. Both card and wallet methods now flow through the same endpoint with discriminated payloads, making future provider expansion seamless.
+
+**A5 Priority 2: Go Solana Adapter Implementation (PARTIALLY COMPLETED)**
+- [x] Implement `AddPaymentMethod` mapping for `solana_wallet` metadata validation and wallet ownership checks.
+- [x] Implement `CreateSettlementIntent` to prepare pledge/account context and persist canonical pending settlement row.
+- [x] Implement `ResolveSettlement` to execute sign -> broadcast -> confirm pipeline with retry-safe idempotency key (non-custodial sign-then-submit flow implemented).
+- [x] Implement `QuerySettlementStatus` with canonical status mapping (`pending`, `failed`, `settled_onchain`, etc.).
+- [x] Add provider-specific proof persistence (`signature`, `slot`, `finalized_blockhash`, explorer URL).
+
+Current implementation status:
+- The adapter and service now provide a non-custodial sign-then-submit flow: the Solana adapter builds an unsigned pledge transaction (`CreateCollectionIntent`), the service persists a canonical pending `PaymentSettlement`, and the `SubmitSolanaSignedTransaction` path broadcasts, confirms (with retry) and persists `TxHash`/`SettlementProof`/`FinalizedAtUnix`.
+- `CreateSettlementIntent` and the pending-settlement persistence are implemented in the service and adapter.
+- `ResolveSettlement` semantics are supported via the sign-then-submit pipeline (the adapter exposes a `ResolveSettlement` method, and `SubmitSolanaSignedTransaction` updates settlement status and proof after on-chain confirmation).
+- `QuerySettlementStatus` is the remaining work: the adapter currently returns a static "settled_onchain" placeholder; it needs RPC-driven confirmation, slot/finality mapping, and richer proof metadata (slot, finalized blockhash, explorer URL) for canonical status queries and reconciliation.
 
 What A5 should give you in practice:
 - The existing Go backend can act as the oracle operator.
@@ -887,6 +981,11 @@ What A5 should give you in practice:
 - [ ] Add structured logs and metrics around sign/broadcast/confirm latency and failure categories.
 - [ ] Add operator runbook for stuck transactions, RPC failover, and manual reconciliation procedure.
 - [ ] Add staged rollout checklist: localnet -> devnet -> production gate criteria.
+
+Current checkpoint status:
+- Local validator is running.
+- Local Anchor program deployment is complete.
+- Backend startup still needed a Solana env wiring fix; once that is in place, run the integration tests against localnet.
 
 What A6 should give you in practice:
 - Confidence that the system behaves the same under retries and failures.

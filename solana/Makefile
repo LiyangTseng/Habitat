@@ -11,8 +11,10 @@ build:
 test:
 	anchor test --skip-local-validator
 
+# execute the following command first and wait until it prints the RPC URL:
+# solana-test-validator --reset
 deploy-local:
-	anchor deploy --provider.cluster localnet
+	anchor program deploy --provider.cluster localnet
 
 idl:
 	anchor build

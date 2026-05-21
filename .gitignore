@@ -5,3 +5,5 @@ solana/docker-target/
 solana/.anchor/
 solana/e2e/node_modules/
 **/test-ledger/
+.vscode/
+.vscode-upload.json
